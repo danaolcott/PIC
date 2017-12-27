@@ -45,17 +45,37 @@ static void irqHandler(void) __interrupt 0
 
 #include <pic16f690.h>
 
-/////////////////////////////////////////////////////////////
+////////////////////////////////////////////////
 //Set the appropriate config bits
 #define __CONFIG           0x2007
 __code unsigned int __at (__CONFIG) cfg0 =  _CP_OFF & _CPD_OFF & _BOREN_OFF & _WDTE_OFF & _MCLRE_OFF & _FOSC_INTRCCLK;
-////////////////////////////////////////////////////////////
+////////////////////////////////////////////////
 
-//#define FOSC 8000000L
 
+////////////////////////////////////////////////
+//configure as timer or counter
+//define counter ro run as counter
+//else, run as timer
+//Note: when using as counter, the number of cycles 
+//to trigger an interrupt is 4 times the input
+//pin toggle frequency.  i think this is due to 
+//min prescale = 2 * 2 triggers to occur.  
+//ie, for a setting =1, if input toggles at 10 hz
+//the counter isr will toggle at 2.5 hz.
+#define USE_COUNTER       1
+#define COUNTER_TRIGGER   (unsigned char)1     //value to trigger an interrupt
+//load tmr0 reg with this value
+#define COUNTER_RESET     (unsigned char)(0xFF - COUNTER_TRIGGER + 1)
+
+
+
+//////////////////////////////////////
 //prototypes
 volatile unsigned int gTimerTick = 0x00;
-void Delay(unsigned int val);
+unsigned int gCycleCounter = 0x00;
+
+
+void Delay(unsigned long val);
 void GPIO_init(void);
 void Timer0_init(void);
 void ClockConfig(unsigned long hz);
@@ -67,18 +87,28 @@ void ClockTune(unsigned char value);
 //number following inerrupt keyword
 //is the isr number.  there is only one
 //interrupt for the pic, so set to 0
+//
+//whne configured as counter, it triggers
+//on overflow.  
 static void irqHandler(void) __interrupt 0
 {
     //test the timer 0 if
     if (T0IF == 1)
     {
+#ifdef USE_COUNTER
+        
+        //do something...
+        PORTC ^= (1u << 1);     //toggle RC1
+        TMR0 = COUNTER_RESET;   //load the initial count value
+#else
         gTimerTick++;
+#endif
         T0IF = 0;
     }
 }
 
 
-
+/////////////////////////////////////
 int main()
 {
     ClockConfig(8000000);   //125, 250hz, 500, 1000hz
@@ -87,8 +117,18 @@ int main()
    
     while (1)
     {
+        //status led
         PORTC ^= (1 << 0);
-        Delay(100);
+
+        //toggle RC3 and connect to RA2
+        //RA2 is the input pin to counter.
+        //RC3 is connected to pin 7
+        //RA2 is pin 17
+        PORTC ^= (1 << 3);
+
+        Delay(50);
+
+        gCycleCounter++;
     }
 
     return 0;
@@ -96,34 +136,39 @@ int main()
 
 
 
-////////////////////////////////////
-//Generic delay function.  Not calibrated
-//this was just to get the quad-core xmas 
-//tree up and running
-//
-void Delay(unsigned int val)
+//////////////////////////////////////////
+//Delay function.
+//When configured as counter, the delay function
+//is not that accurate.  When configured as timer
+//the delay function works well.
+void Delay(unsigned long val)
 {
-    //reset the global timetick - increments
-    //in the timer 0 isr    
+#ifdef USE_COUNTER
+    volatile unsigned long temp = val * 96;
+    while (temp > 0)
+        temp--;
+#else
     gTimerTick = 0x00;
     while(gTimerTick < val){};
+#endif
+
 }
 
 
 
 ////////////////////////////////////
-//RC0 as output
-//see Table 5 in datasheet for ANSEL bit
-//to clear, clear all for now.
+//RC0-RC3 as output
+//
 void GPIO_init(void)
 {
-    PORTC &=~ 0x01;     //initial value
-    TRISC &=~ 0x01;     //config as output
+    PORTC &=~ 0x0F;     //initial value
+    TRISC &=~ 0x0F;     //config as output-c0-c3
 
     //configure ra4 as output - clkout
     TRISA &=~ (1u << 4);
 
-    ANSEL = 0x00;     //set as digital
+    //config all io as digital
+    ANSEL = 0x00;
     ANSELH = 0x00;
 }
 
@@ -138,7 +183,11 @@ void Timer0_init(void)
 {
     //Registers of interest:
     //TMR0 - 8 bit reg - can write directly
+#ifdef USE_COUNTER
+    TMR0 = COUNTER_RESET;   //load the initial count value
+#else
     TMR0 = 0x00;        //clear the timer
+#endif
 
     //OPTION reg - bit T0CS - set to 0 for timer mode
     //RA2 - configure as T0CKI for counter, set T0CS 1 for counter mode.
@@ -151,13 +200,20 @@ void Timer0_init(void)
     //000 = 2;
     //001 = 4;
     //010 = 8;
-
+#ifdef USE_COUNTER
+    OPTION_REG |= (1u << 5);       //counter mode
+#else
     OPTION_REG &=~ (1u << 5);       //timer mode
+#endif
     OPTION_REG |= (1u << 4);        //high-low, dont care, counter only
     OPTION_REG &=~ (1u << 3);       //prescale timer 0
     OPTION_REG &=~ 0x07;            //clear bits 0-2
 
+#ifdef USE_COUNTER
+    OPTION_REG |= 0x00;            //prescale 2 for counter
+#else
     OPTION_REG |= 0x02;            //prescale 8 = about 980hz
+#endif
 
     //interrupt flag
     INTCON |= (1u << 7);            //GIE enable
