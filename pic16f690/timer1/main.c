@@ -16,7 +16,10 @@ Pin configs:
 RC0-RC3 output digital
 RA2 - counter input
 
-Add a usart out of RB7 as a way of output the measured freq.
+Add a usart:
+RB5 - RX - pin 12
+RB7 - TX - pin 10
+
 from pile counter code.
 
 */
@@ -45,6 +48,45 @@ __code unsigned int __at (__CONFIG) cfg0 =  _CP_OFF & _CPD_OFF & _BOREN_OFF & _W
 //load tmr0 reg with this value
 #define COUNTER_RESET     (unsigned char)(0xFF - COUNTER_TRIGGER + 1)
 
+///////////////////////////////////////////////////
+/*
+Measurements and Settings
+
+///////////////////////////////////////////////////////////////
+Use the following for frequency from 100hz = 4000hz
+
+counter# 10, prescale = 8, factor = 250000
+f = 2 * counter# * factor / tim1
+
+freq = 2 * trigger * 250000 / timer1cnt     //timer1 prescale = 8
+//////////////////////////////////////////////////////////////
+
+
+Suitable Freq Ranges:
+using the following settings:
+counter# 10, prescale = 8, factor = 250000
+f = 2 * counter# * factor / tim1
+
+freq(scope)     tim1        freq(computed)
+3500            1400        3571
+208             24241       206
+114             44366       112
+
+
+using prescale = 8, counter = 1 ans looking
+at lower frequencies
+
+24.5            XX          24
+12.5            xx          12
+6.3             XX          32 - bad!!!
+8.33            xx          8 - ok 
+
+conclusion - breaks at just below 10hz, probable where timer1
+overflows. wonder if you can test the flag??
+
+
+*/
+
 
 
 //////////////////////////////////////
@@ -55,6 +97,8 @@ unsigned int gCycleCounter = 0x00;
 volatile unsigned char gActiveFrequency = 1;
 volatile unsigned long gFrequency1 = 0x00;
 volatile unsigned long gFrequency2 = 0x00;
+volatile unsigned long gTimer1Value = 0x00;
+
 
 
 void Delay(unsigned long val);
@@ -67,24 +111,23 @@ void Timer1_init(void);
 void Timer1_start(void);
 void Timer1_stop(void);
 void Timer1_reset(void);
+void Timer1_setValue(unsigned int value);
+
 unsigned int Timer1_getValue(void);
 unsigned long Timer1_getFrequency(void);
+unsigned long gFreq;
 
 unsigned char dec2Buff(unsigned long val, char* buffer);
 void USART_init(void);
 void USART_Write(char* buffer, unsigned char length);
 void USART_WriteString(const char* buffer);
-void USART_ProcessCommand(unsigned char* buffer, unsigned char length);
 
 
 unsigned char n;
 #define OUT_BUFFER_SIZE     32
-#define RX_BUFFER_SIZE      32
+
 char outbuffer[OUT_BUFFER_SIZE];
 
-//receiver variables
-unsigned char rxIndex = 0x00;
-unsigned char rxBuffer[RX_BUFFER_SIZE];
 
 ////////////////////////////////////////
 //Interrupt Service Routine
@@ -97,7 +140,9 @@ unsigned char rxBuffer[RX_BUFFER_SIZE];
 static void irqHandler(void) __interrupt 0
 {    
     unsigned char c = 0x00;
-
+  
+    unsigned long counter = 0;
+      
     //soucre = timer0 / counter0
     if (T0IF == 1)
     {
@@ -108,20 +153,21 @@ static void irqHandler(void) __interrupt 0
         //in non active freq and switch
         //freq = counter * 1000000 / ticks
         //
-        unsigned long tick = Timer1_getValue();
-        unsigned long counter = (unsigned long)COUNTER_TRIGGER * 2;
+  
+        gTimer1Value = Timer1_getValue() & 0xFFFF;
+        counter = ((unsigned long)COUNTER_TRIGGER * 2) & 0xFFFF;
 
-        if (!tick)
-            tick = 1;
+        if (!gTimer1Value)
+            gTimer1Value = 1;
 
         if (gActiveFrequency == 1)
         {
-            gFrequency2 = counter * 1000000 / tick;
+            gFrequency2 = counter * 250000 / gTimer1Value;     //prescale2
             gActiveFrequency = 2;
         }
         else
         {
-            gFrequency1 = counter * 1000000 / tick;
+            gFrequency1 = counter * 250000 / gTimer1Value;     //prescale2
             gActiveFrequency = 1;
         }
         
@@ -129,10 +175,9 @@ static void irqHandler(void) __interrupt 0
         PORTC ^= (1u << 1);     //toggle RC1
         TMR0 = COUNTER_RESET;   //load the initial count value
 
-        //reset timer1
-        Timer1_stop();
+        //reset timer
         Timer1_reset();
-        Timer1_start();
+
 #else
         gTimerTick++;
 #endif
@@ -140,30 +185,7 @@ static void irqHandler(void) __interrupt 0
     }
 
 
-    ////////////////////////////////////////
-    //receiver interrupt
-    if (RCIF == 1)    
-    {
-        c = RCREG;
-
-        if ((rxIndex < (RX_BUFFER_SIZE - 1)) && (c != 0x00))
-        {
-            rxBuffer[rxIndex] = c;
-            rxIndex++;
-
-            //end of message?
-            if (c == '\n')
-            {
-                rxBuffer[rxIndex] = 0x00;
-                USART_ProcessCommand(rxBuffer, rxIndex);
-                rxIndex = 0x00;
-            }
-        }
-
-
-        RCIF = 0;        
-    }
-
+   
 }
 
 
@@ -188,16 +210,17 @@ int main()
         PORTC ^= (1 << 3);
 
         //output the value over usart every 100 cycles
-        if (!(gCycleCounter % 500))
+        if (!(gCycleCounter % 100))
         {
             USART_WriteString("Freq: ");
+            gFreq = Timer1_getFrequency();
+            n = dec2Buff(gFreq, outbuffer);
 
-            n = dec2Buff(Timer1_getFrequency(), outbuffer);
             USART_Write(outbuffer, n);
             USART_WriteString("hz\r\n");
         }
 
-        Delay(1);
+        Delay(60);
         gCycleCounter++;
     }
 
@@ -371,10 +394,16 @@ void Timer1_init(void)
     //T1CON register
     T1CON &=~ (1u << 7);    //timer1 gate active low - NA
     T1CON &=~ (1u << 6);    //timer1 is on regardless of gate
-    T1CON &=~ (1u << 5);    //prescale 01 - 1:2
-    T1CON |= (1u << 4);     //prescale 01 - 1:2
+
+  //  T1CON &=~ (1u << 5);    //prescale 01 - 1:2
+  //  T1CON |= (1u << 4);     //prescale 01 - 1:2
+
+    T1CON |= (1u << 5);    //prescale 11 - 1:8
+    T1CON |= (1u << 4);     //prescale 11 - 1:8
+
+
     T1CON &=~ (1u << 3);    //LP is off
-    T1CON |= (1u << 2);     //no sync ext clock - NA
+    T1CON |= (1u << 2);     //no sync ext clock - ok
     T1CON &=~ (1u << 1);    //internal clock - fosc/4
     T1CON |= (1u << 0);     //timer1 is on
 
@@ -385,14 +414,14 @@ void Timer1_init(void)
 //Start timer tick - bit 0 T1CON
 void Timer1_start(void)
 {
-    T1CON |= (1u << 0); //enable
+    T1CON |= 0x01; //enable
 }
 
 //////////////////////////////
 //Stop timer1 - bit 0 low T1CON
 void Timer1_stop(void)
 {
-    T1CON &=~ (1u << 0);    //disable
+    T1CON &=~ 0x01;    //disable
 }
 
 ///////////////////////////////
@@ -400,17 +429,37 @@ void Timer1_stop(void)
 //registers TMR1H and TMR1L
 void Timer1_reset(void)
 {
-    TMR1H = 0x00;
+    T1CON &=~ 0x01;    //disable
     TMR1L = 0x00;
+    TMR1H = 0x00;
+    T1CON |= 0x01;    //enable
 }
+
+
+//////////////////////////////////////
+//set timer value
+//sopt, set, resume
+void Timer1_setValue(unsigned int value)
+{
+    T1CON &=~ 0x01;    //disable
+    TMR1L = value & 0xFF;
+    TMR1H = (value >> 8) & 0xFF;
+    T1CON |= 0x01;    //enable
+
+}
+
 
 //////////////////////////////////
 //Return current 16bit timer1 value
 unsigned int Timer1_getValue(void)
 {
-    unsigned int valuel = TMR1L;
-    unsigned int valueh = TMR1H;
-    unsigned int val = (valuel & 0xFF) | ((valueh & 0xFF) << 8);
+    unsigned int valuel, valueh, val;
+
+    T1CON &=~ 0x01;    //disable
+    valuel = TMR1L;
+    valueh = TMR1H;
+    val = ((valuel & 0xFF) + ((valueh & 0xFF) << 8));
+    T1CON |= 0x01;    //enable
 
     return val;
 }
@@ -457,19 +506,6 @@ void USART_init(void)
     //receiver - 12.1.2.1
     SYNC = 0;
     SPEN = 1;
-
-    //config rx interrupts
-    RCIE = 1;       //PIE1 register
-    PEIE = 1;       //INTCON register
-    GIE = 1;        //intcon register
-
-    CREN = 1;       //enable the receiver
-
-    
-    //check this in the isr
-    //RCIF - receiver interrupt flag
-    c = RCREG;
-    RCIF = 0x00;
 
 
 }
@@ -530,7 +566,7 @@ void USART_WriteString(const char* buffer)
 //buffer with return value of num chars to 
 //print.
 //For now, assume that is upto 10 000 000 - 8 chars
-unsigned char dec2Buff(unsigned long val, char* buffer)
+unsigned char dec2Buff(unsigned long val, unsigned char* buffer)
 {
     unsigned char i = 0;
     unsigned char digit;
@@ -556,40 +592,25 @@ unsigned char dec2Buff(unsigned long val, char* buffer)
             digit = 0;
 
         //get the acsii - base + digit
-        c[9-i] = (unsigned char)(0x30 + digit);      //ascii value for the digit
+        buffer[i] = (unsigned char)(0x30 + digit);
+          
         temp = temp / 10;
     }
 
-    //copy c into buffer
-    for (i = 0 ; i < 10 ; i++)
-        buffer[i] = (unsigned char)c[i];
+    //copy in reverse - not sure why could not
+    //reverse in place, not working
+    //
+    for (i = 0 ; i < num ; i++)
+        c[i] = buffer[num - i - 1];
+   
+    for (i = 0 ; i < num ; i++)
+        buffer[i] = c[i];
 
+    buffer[num] = 0x00;     //null terminated
     
     return num;
 }
 
-
-
-
-///////////////////////////////////////
-//
-void USART_ProcessCommand(unsigned char* buffer, unsigned char length)
-{
-    if (length > 0)
-    {
-        if (buffer[0] == 'a')
-            USART_WriteString("cmd: a\r\n");
-        else if (buffer[0] == 'b')
-            USART_WriteString("cmd: b\r\n");
-        else if (buffer[0] == 'c')
-            USART_WriteString("cmd: c\r\n");
-        else if (buffer[0] == 'd')
-            USART_WriteString("cmd: d\r\n");
-
-
-
-    }    
-}
 
 
 
