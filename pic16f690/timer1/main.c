@@ -73,16 +73,29 @@ freq(scope)     tim1        freq(computed)
 114             44366       112
 
 
+
+
 using prescale = 8, counter = 1 ans looking
-at lower frequencies
+at lower frequencies.  added a check for
+tmr1if - overflow... it works.!!
+
+conclusion - good down to about 5hz
 
 24.5            XX          24
 12.5            xx          12
-6.3             XX          32 - bad!!!
+6.3             XX          32 - bad (ok with tmr1if check)
 8.33            xx          8 - ok 
+2.5             xx          7 - bad!!
+5               xx          4 - ??
 
-conclusion - breaks at just below 10hz, probable where timer1
 overflows. wonder if you can test the flag??
+so can probably get down to about 5hz
+using the tmr1if
+
+
+
+//try another settin - 20 x 2 samples
+//prescale = 8, see what freq. range we can get
 
 
 */
@@ -155,6 +168,10 @@ static void irqHandler(void) __interrupt 0
         //
   
         gTimer1Value = Timer1_getValue() & 0xFFFF;
+
+        if (TMR1IF == 1)
+            gTimer1Value += 0xFFFF;
+
         counter = ((unsigned long)COUNTER_TRIGGER * 2) & 0xFFFF;
 
         if (!gTimer1Value)
@@ -175,7 +192,7 @@ static void irqHandler(void) __interrupt 0
         PORTC ^= (1u << 1);     //toggle RC1
         TMR0 = COUNTER_RESET;   //load the initial count value
 
-        //reset timer
+        //reset timer and clears overflow flag
         Timer1_reset();
 
 #else
@@ -220,7 +237,7 @@ int main()
             USART_WriteString("hz\r\n");
         }
 
-        Delay(60);
+        Delay(1);
         gCycleCounter++;
     }
 
@@ -405,6 +422,9 @@ void Timer1_init(void)
     T1CON &=~ (1u << 3);    //LP is off
     T1CON |= (1u << 2);     //no sync ext clock - ok
     T1CON &=~ (1u << 1);    //internal clock - fosc/4
+
+    TMR1IF = 0x00;    //timer1 flag
+
     T1CON |= (1u << 0);     //timer1 is on
 
 }
@@ -431,7 +451,8 @@ void Timer1_reset(void)
 {
     T1CON &=~ 0x01;    //disable
     TMR1L = 0x00;
-    TMR1H = 0x00;
+    TMR1H = 0x00;    
+    TMR1IF = 0x00;    //timer1 flag
     T1CON |= 0x01;    //enable
 }
 
@@ -444,6 +465,7 @@ void Timer1_setValue(unsigned int value)
     T1CON &=~ 0x01;    //disable
     TMR1L = value & 0xFF;
     TMR1H = (value >> 8) & 0xFF;
+    TMR1IF = 0x00;    //timer1 flag
     T1CON |= 0x01;    //enable
 
 }
