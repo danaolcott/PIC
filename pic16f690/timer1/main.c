@@ -44,7 +44,7 @@ __code unsigned int __at (__CONFIG) cfg0 =  _CP_OFF & _CPD_OFF & _BOREN_OFF & _W
 //ie, for a setting =1, if input toggles at 10 hz
 //the counter isr will toggle at 2.5 hz.
 #define USE_COUNTER       1
-#define COUNTER_TRIGGER   (unsigned char)1     //value to trigger an interrupt
+#define COUNTER_TRIGGER   (unsigned char)5     //value to trigger an interrupt
 //load tmr0 reg with this value
 #define COUNTER_RESET     (unsigned char)(0xFF - COUNTER_TRIGGER + 1)
 
@@ -96,6 +96,7 @@ using the tmr1if
 
 //try another settin - 20 x 2 samples
 //prescale = 8, see what freq. range we can get
+4000khz looks ok, can't generate it any faster.
 
 
 */
@@ -227,7 +228,7 @@ int main()
         PORTC ^= (1 << 3);
 
         //output the value over usart every 100 cycles
-        if (!(gCycleCounter % 100))
+        if (!(gCycleCounter % 3000))
         {
             USART_WriteString("Freq: ");
             gFreq = Timer1_getFrequency();
@@ -254,7 +255,7 @@ int main()
 void Delay(unsigned long val)
 {
 #ifdef USE_COUNTER
-    volatile unsigned long temp = val * 96;
+    volatile unsigned long temp = val * 10;
     while (temp > 0)
         temp--;
 #else
