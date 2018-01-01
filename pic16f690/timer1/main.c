@@ -44,9 +44,19 @@ __code unsigned int __at (__CONFIG) cfg0 =  _CP_OFF & _CPD_OFF & _BOREN_OFF & _W
 //ie, for a setting =1, if input toggles at 10 hz
 //the counter isr will toggle at 2.5 hz.
 #define USE_COUNTER       1
-#define COUNTER_TRIGGER   (unsigned char)5     //value to trigger an interrupt
+#define COUNTER_TRIGGER   (unsigned char)10     //value to trigger an interrupt
 //load tmr0 reg with this value
 #define COUNTER_RESET     (unsigned char)(0xFF - COUNTER_TRIGGER + 1)
+
+//multiplier for prescale 8 and counter trigger
+#define PRESCALE_8         ((unsigned long)250000)
+#define PRESCALE_4         ((unsigned long)500000)
+#define PRESCALE_2         ((unsigned long)1000000)
+
+#define PRESCALE           PRESCALE_8
+
+#define FREQUENCY_FACTOR      (2 * COUNTER_TRIGGER * PRESCALE)
+
 
 ///////////////////////////////////////////////////
 /*
@@ -114,7 +124,6 @@ volatile unsigned long gFrequency2 = 0x00;
 volatile unsigned long gTimer1Value = 0x00;
 
 
-
 void Delay(unsigned long val);
 void GPIO_init(void);
 void Timer0_init(void);
@@ -137,9 +146,10 @@ void USART_Write(char* buffer, unsigned char length);
 void USART_WriteString(const char* buffer);
 
 
+////////////////////////////////////
+//usart output
 unsigned char n;
 #define OUT_BUFFER_SIZE     32
-
 char outbuffer[OUT_BUFFER_SIZE];
 
 
@@ -152,54 +162,48 @@ char outbuffer[OUT_BUFFER_SIZE];
 //whne configured as counter, it triggers
 //on overflow.  
 static void irqHandler(void) __interrupt 0
-{    
-    unsigned char c = 0x00;
-  
-    unsigned long counter = 0;
-      
-    //soucre = timer0 / counter0
+{          
+    //interrupt soucre = timer0
     if (T0IF == 1)
     {
 
 #ifdef USE_COUNTER
         
-        //compute the tick freq and store
-        //in non active freq and switch
-        //freq = counter * 1000000 / ticks
-        //
-  
+        //compute input frequency on RA2  
         gTimer1Value = Timer1_getValue() & 0xFFFF;
 
+        //check timer1 overflow flag
         if (TMR1IF == 1)
             gTimer1Value += 0xFFFF;
 
-        counter = ((unsigned long)COUNTER_TRIGGER * 2) & 0xFFFF;
-
-        if (!gTimer1Value)
+        if (!gTimer1Value)      //avoid / 0
             gTimer1Value = 1;
 
+        //FREQUENCY_FACTOR accounts for num cycles and
+        //timer1 prescaler.
         if (gActiveFrequency == 1)
         {
-            gFrequency2 = counter * 250000 / gTimer1Value;     //prescale2
+            gFrequency2 = FREQUENCY_FACTOR / gTimer1Value;     //prescale2
             gActiveFrequency = 2;
         }
         else
         {
-            gFrequency1 = counter * 250000 / gTimer1Value;     //prescale2
+            gFrequency1 = FREQUENCY_FACTOR / gTimer1Value;     //prescale2
             gActiveFrequency = 1;
         }
         
-        //do something...
+        //flash debug led to indicate polling rate
+        //init counter value to roll over at specified rate
         PORTC ^= (1u << 1);     //toggle RC1
         TMR0 = COUNTER_RESET;   //load the initial count value
 
-        //reset timer and clears overflow flag
+        //reset timer and clear overflow flag
         Timer1_reset();
 
 #else
         gTimerTick++;
 #endif
-        T0IF = 0;
+        T0IF = 0;       //clear the counter flag
     }
 
 
@@ -228,7 +232,7 @@ int main()
         PORTC ^= (1 << 3);
 
         //output the value over usart every 100 cycles
-        if (!(gCycleCounter % 3000))
+        if (!(gCycleCounter % 100))
         {
             USART_WriteString("Freq: ");
             gFreq = Timer1_getFrequency();
@@ -238,7 +242,7 @@ int main()
             USART_WriteString("hz\r\n");
         }
 
-        Delay(1);
+        Delay(10);
         gCycleCounter++;
     }
 
@@ -255,7 +259,7 @@ int main()
 void Delay(unsigned long val)
 {
 #ifdef USE_COUNTER
-    volatile unsigned long temp = val * 10;
+    volatile unsigned long temp = val * 96;
     while (temp > 0)
         temp--;
 #else
@@ -279,12 +283,10 @@ void GPIO_init(void)
     TRISA &=~ (1u << 4);
 
     //RA2 as counter source input
-    //from 4-3, looks like this is
-    //only one to set, other than disable 
+    //set as input and disable any pullup/down
     //any pullup/down
     TRISA |= (1u << 2);             //config as input   
     WPUA &=~ (1u << 2);             //disable weak pullup
-
 
     //config all io as digital
     ANSEL = 0x00;
@@ -340,8 +342,6 @@ void Timer0_init(void)
 
     //clear the interrupt flag
     INTCON &=~ (1u << 2);           //flag T0IF
-
-
 }
 
 
@@ -419,12 +419,11 @@ void Timer1_init(void)
     T1CON |= (1u << 5);    //prescale 11 - 1:8
     T1CON |= (1u << 4);     //prescale 11 - 1:8
 
-
     T1CON &=~ (1u << 3);    //LP is off
     T1CON |= (1u << 2);     //no sync ext clock - ok
     T1CON &=~ (1u << 1);    //internal clock - fosc/4
 
-    TMR1IF = 0x00;    //timer1 flag
+    TMR1IF = 0x00;          //timer1 overflow flag
 
     T1CON |= (1u << 0);     //timer1 is on
 
@@ -453,7 +452,7 @@ void Timer1_reset(void)
     T1CON &=~ 0x01;    //disable
     TMR1L = 0x00;
     TMR1H = 0x00;    
-    TMR1IF = 0x00;    //timer1 flag
+    TMR1IF = 0x00;    //clear ov flag
     T1CON |= 0x01;    //enable
 }
 
@@ -463,12 +462,11 @@ void Timer1_reset(void)
 //sopt, set, resume
 void Timer1_setValue(unsigned int value)
 {
-    T1CON &=~ 0x01;    //disable
-    TMR1L = value & 0xFF;
-    TMR1H = (value >> 8) & 0xFF;
-    TMR1IF = 0x00;    //timer1 flag
-    T1CON |= 0x01;    //enable
-
+    T1CON &=~ 0x01;             //disable
+    TMR1L = value & 0xFF;       //low byte
+    TMR1H = (value >> 8) & 0xFF;//high byte
+    TMR1IF = 0x00;              //clear ov flag
+    T1CON |= 0x01;              //enable
 }
 
 
@@ -476,15 +474,14 @@ void Timer1_setValue(unsigned int value)
 //Return current 16bit timer1 value
 unsigned int Timer1_getValue(void)
 {
-    unsigned int valuel, valueh, val;
+    unsigned int valuel, valueh;
 
     T1CON &=~ 0x01;    //disable
     valuel = TMR1L;
     valueh = TMR1H;
-    val = ((valuel & 0xFF) + ((valueh & 0xFF) << 8));
     T1CON |= 0x01;    //enable
 
-    return val;
+    return ((valuel & 0xFF) + ((valueh & 0xFF) << 8));
 }
 
 
@@ -510,8 +507,6 @@ unsigned long Timer1_getFrequency(void)
 
 void USART_init(void)
 {
-    unsigned char c;
-
     //baud rate
 	SPBRGH = 51;
 	SPBRG = 51;
@@ -525,11 +520,6 @@ void USART_init(void)
 	//set the SPEN bit.  Clearing the SYNC 
 	SYNC = 0;       //enable async opperation
 	SPEN = 1;       //auto config tx/rx pins as output/input
-
-    //receiver - 12.1.2.1
-    SYNC = 0;
-    SPEN = 1;
-
 
 }
 
@@ -589,45 +579,32 @@ void USART_WriteString(const char* buffer)
 //buffer with return value of num chars to 
 //print.
 //For now, assume that is upto 10 000 000 - 8 chars
-unsigned char dec2Buff(unsigned long val, unsigned char* buffer)
+
+//keep getting warnings about left operand too
+//short for reuslt regarding data in c or buffer
+//
+unsigned char dec2Buff(unsigned long val, char* buffer)
 {
     unsigned char i = 0;
-    unsigned char digit;
+    char digit;
     unsigned char num = 0;
-    unsigned long temp = val;
-    unsigned int c[10];
+    char t;
 
-    for (i = 0 ; i < 10 ; i++)
+    while (val > 0)
     {
-        if (temp >= 10)
-        {
-            digit = temp % 10;      //get the ones
-            num++;
-        }
-
-        else if ((temp < 10) && (temp > 0))
-        {
-            digit = temp;
-            num++;
-        }
-
-        else
-            digit = 0;
-
-        //get the acsii - base + digit
-        buffer[i] = (unsigned char)(0x30 + digit);
-          
-        temp = temp / 10;
+        digit = (char)(val % 10);
+        buffer[num] = (0x30 + digit) & 0x7F;
+        num++;          
+        val = val / 10;
     }
 
-    //copy in reverse - not sure why could not
-    //reverse in place, not working
-    //
-    for (i = 0 ; i < num ; i++)
-        c[i] = buffer[num - i - 1];
-   
-    for (i = 0 ; i < num ; i++)
-        buffer[i] = c[i];
+    //reverse in place
+    for (i = 0 ; i < num / 2 ; i++)
+    {
+        t = buffer[i];
+        buffer[i] = buffer[num - i - 1];
+        buffer[num - i - 1] = t;
+    }  
 
     buffer[num] = 0x00;     //null terminated
     
